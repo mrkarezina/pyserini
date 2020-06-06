@@ -38,4 +38,8 @@ def reciprocal_rank_fusion(trec_runs: List[TrecRun], rrf_k: int = 60, depth: int
     """
 
     rrf_runs = [run.clone().rescore(method='rrf', rrf_k=rrf_k) for run in trec_runs]
-    return TrecRun.merge(rrf_runs, 'sum', depth, k)
+    return TrecRun.merge(rrf_runs, 'sum', depth=depth, k=k)
+
+
+def interoplation(trec_runs: List[TrecRun], alpha: int = 0.5, depth: int = None, k: int = None):
+    return TrecRun.merge(trec_runs, 'interpolation', alpha=alpha, depth=depth, k=k)

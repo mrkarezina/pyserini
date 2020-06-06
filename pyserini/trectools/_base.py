@@ -15,8 +15,14 @@
 #
 
 from copy import deepcopy
+from enum import Enum
 import pandas as pd
 from typing import Set
+
+
+class FusionMethod(Enum):
+    RRF = 'rrf'
+    INTERPOLATION = 'interpolation'
 
 
 class TrecRun:
@@ -70,6 +76,14 @@ class TrecRun:
 
         return docs
 
+    def get_docids_by_topic(self, topic: str, max_docs: int = None) -> Set[str]:
+        docs = self.run_data[self.run_data['topic'] == topic]
+
+        if max_docs is not None:
+            docs = docs.head(max_docs)
+
+        return docs
+
     def rescore(self, method: str, rrf_k: int):
         if method == 'rrf':
             rows = []
@@ -90,7 +104,7 @@ class TrecRun:
         return all_topics
 
     @staticmethod
-    def merge(runs, aggregation: str, depth: int = None, k: int = None):
+    def merge(runs, aggregation: str, alpha: float = 0.5, depth: int = None, k: int = None):
         if len(runs) < 2:
             raise Exception('Merge requires at least 2 runs.')
 
@@ -104,11 +118,28 @@ class TrecRun:
                         doc_scores[docid] = doc_scores.get(docid, 0.0) + score
 
                 sorted_doc_scores = sorted(iter(doc_scores.items()), key=lambda x: (-x[1], x[0]))
-                sorted_doc_scores = sorted_doc_scores if k is None else sorted_doc_scores[:k] 
+                sorted_doc_scores = sorted_doc_scores if k is None else sorted_doc_scores[:k]
 
                 for rank, (docid, score) in enumerate(sorted_doc_scores, start=1):
                     rows.append((topic, 'Q0', docid, rank, score, 'merge_sum'))
 
+        elif aggregation == 'interpolation':
+            if len(runs) != 2:
+                raise Exception('Interpolation can only be performed on exactly two runs.')
+
+            for topic in TrecRun.get_all_topics_from_runs(runs):
+                doc_scores = dict()
+                for run in runs:
+                    for topic, _, docid, _, score, _ in run.get_docs_by_topic(topic, depth).to_numpy():
+                        doc_scores[docid] = doc_scores.get(docid, [])
+                        doc_scores[docid].append(score)
+
+                sorted_doc_scores = sorted(iter(doc_scores.items()), key=lambda x: (-x[1], x[0]))
+                sorted_doc_scores = sorted_doc_scores if k is None else sorted_doc_scores[:k]
+
+                for rank, (docid, scores) in enumerate(sorted_doc_scores, start=1):
+                    score = alpha * scores[0] + (1-alpha) * scores[1]
+                    rows.append((topic, 'Q0', docid, rank, score, 'interpolation'))
         else:
             raise Exception(f'Unknown aggregation method {aggregation} detected.')
 
