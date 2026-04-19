@@ -17,7 +17,7 @@ With Pyserini, it's easy to reproduce runs on a number of standard IR test colle
 
 For additional details, [our paper](https://dl.acm.org/doi/10.1145/3404835.3463238) in SIGIR 2021 provides a nice overview.
 
-✨ **New!** Pyserini provides a [REST API](docs/usage-rest.md) as well as an [MCP server](docs/usage-mcp.md)! 
+✨ **New!** Pyserini provides a [REST API](docs/usage-rest.md) as well as an [MCP server](docs/usage-mcp.md)!
 
 ✨ Guide to working with the [MS MARCO 2.1 Document Corpus](docs/experiments-msmarco-v2.1.md) for TREC 2024 RAG Track.
 
@@ -30,23 +30,22 @@ pip install pyserini
 ```
 
 Pyserini is built on Python 3.12 (other versions might work, but YMMV) and Java 21 (due to its dependency on [Anserini](http://anserini.io/)).
-A `pip` installation will automatically pull in major dependencies such as [PyTorch](https://pytorch.org/), [🤗 Transformers](https://github.com/huggingface/transformers), and the [ONNX Runtime](https://onnxruntime.ai/).
 
-The toolkit also has a number of optional dependencies:
+❗ A `pip` installation will automatically pull in major dependencies such as [PyTorch](https://pytorch.org/), [🤗 Transformers](https://github.com/huggingface/transformers), and the [ONNX Runtime](https://onnxruntime.ai/).
+Sometimes `pip` has issues pulling in the "right" versions; if this is the case, it might make sense to install these dependencies first (selecting the right version by hand, perhaps via `conda`).
 
-```bash
-pip install 'pyserini[optional]'
-```
+❗ Parts of Pyserini depend on [Faiss](https://github.com/facebookresearch/faiss).
+It's not included in the dependencies list because there is a proliferation of variants (`faiss-cpu`, `faiss-gpu`, etc.), so it's easier if you install the right variant yourself.
 
-Notably, `faiss-cpu` is included as an optional dependency; the package can be tricky to install, which is why it is not included in the core dependencies.
-It might be a good idea to install it yourself separately.
+Multimodal support (e.g., image search) has been pushed into an `optional` package.
+If you need it, install `'pyserini[optional]'`
 
 The software ecosystem is rapidly evolving and a potential source of frustration is incompatibility among different versions of underlying dependencies.
-We provide additional detailed installation instructions in [a separate page](./docs/installation.md).
+We provide additional detailed installation instructions in [our detailed installation guide](./docs/installation.md).
 
 If you're planning on just _using_ Pyserini, then the `pip` instruction (without the optional dependencies) should be fine.
 However, if you're planning on contributing to the codebase or want to work with the latest not-yet-released features, you'll need a development installation.
-Instructions are provided [here](./docs/installation.md#development-installation).
+Instructions are provided in [our detailed installation guide](./docs/installation.md#development-installation).
 
 ## 🙋 How do I search?
 
