@@ -28,7 +28,8 @@ import asyncio
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
-from pyserini.server.rest.backend import LuceneSearcherRestBackend
+from pyserini.server.backend import SharedSearchBackend
+from pyserini.server.errors import BadSearchRequestError, DocumentNotFoundError, IndexNotAvailableError
 
 router = APIRouter(tags=['v1'])
 
@@ -50,8 +51,8 @@ def _parse_bool(raw: str | None, default: bool, name: str) -> tuple[bool | None,
     return None, _error(400, f"Parameter '{name}' must be 'true' or 'false'")
 
 
-def _backend(request: Request) -> LuceneSearcherRestBackend:
-    return request.app.state.lucene_rest
+def _backend(request: Request) -> SharedSearchBackend:
+    return request.app.state.search_backend
 
 
 @router.get('/{index:path}/search')
@@ -82,10 +83,37 @@ async def search_v1(
         return bad_parse
     assert parse_flag is not None
 
-    payload = await asyncio.to_thread(backend.search, index_token, query, hits_val, parse_flag)
-    if payload is None:
-        return _error(400, f'Unable to open index: {index_token}')
-    return payload
+    try:
+        payload = await asyncio.to_thread(
+            backend.search,
+            query,
+            index_token,
+            hits_val,
+            '',
+            parse_flag,
+            True,
+        )
+    except IndexNotAvailableError as e:
+        return _error(400, str(e))
+    except BadSearchRequestError as e:
+        return _error(400, str(e))
+    except DocumentNotFoundError as e:
+        return _error(404, str(e))
+    candidates = [
+        {
+            'docid': cand['docid'],
+            'score': cand['score'],
+            'rank': cand['rank'],
+            'doc': cand.get('doc'),
+        }
+        for cand in payload.get('candidates', [])
+    ]
+    return {
+        'api': 'v1',
+        'index': index_token,
+        'query': {'text': query},
+        'candidates': candidates,
+    }
 
 
 @router.get('/{index:path}/doc/{docid}')
@@ -99,7 +127,7 @@ async def get_document_v1(
     index_token = backend.decode_path_segment(index)
     docid_token = backend.decode_path_segment(docid)
 
-    if docid_token is None or not str(docid_token).strip():
+    if not str(docid_token).strip():
         return _error(400, "Path parameter 'docid' is required")
 
     parse_flag, bad_parse = _parse_bool(parse, True, 'parse')
@@ -107,9 +135,15 @@ async def get_document_v1(
         return bad_parse
     assert parse_flag is not None
 
-    body, index_ok = await asyncio.to_thread(backend.get_document, index_token, docid_token, parse_flag)
-    if not index_ok:
-        return _error(400, f'Unable to open index: {index_token}')
-    if body is None:
+    try:
+        doc = await asyncio.to_thread(backend.get_document, docid_token, index_token, parse_flag, True)
+        return {
+            'api': 'v1',
+            'index': index_token,
+            'docid': docid_token,
+            'doc': doc,
+        }
+    except IndexNotAvailableError as e:
+        return _error(400, str(e))
+    except DocumentNotFoundError:
         return _error(404, f'Document not found: {docid_token}')
-    return body

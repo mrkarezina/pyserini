@@ -30,6 +30,7 @@ Endpoints:
 from __future__ import annotations
 
 import json
+import logging
 from contextlib import asynccontextmanager
 from importlib import resources
 
@@ -38,8 +39,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from pyserini.server.rest.backend import LuceneSearcherRestBackend
+from pyserini.server.backend import SharedSearchBackend
 from pyserini.server.rest.routes import v1
+
+logger = logging.getLogger(__name__)
 
 SERVER_NAME = 'Pyserini API'
 API_VERSION = 'v1'
@@ -65,9 +68,9 @@ def _load_openapi_text() -> str:
 def create_app(index_config_path: str | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        app.state.lucene_rest = LuceneSearcherRestBackend(index_config_path)
+        app.state.search_backend = SharedSearchBackend(index_config_path)
         yield
-        app.state.lucene_rest.close_all()
+        app.state.search_backend.close_all()
 
     app = FastAPI(
         title=SERVER_NAME,
@@ -78,7 +81,8 @@ def create_app(index_config_path: str | None = None) -> FastAPI:
 
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception):
-        return JSONResponse(status_code=500, content={'error': str(exc)})
+        logger.exception('Unhandled error in REST API')
+        return JSONResponse(status_code=500, content={'error': 'Internal server error'})
 
     @app.exception_handler(StarletteHTTPException)
     async def starlette_http_exception_handler(request: Request, exc: StarletteHTTPException):
