@@ -25,13 +25,12 @@ from urllib.parse import unquote
 
 import requests
 
-from pyserini.encode import AutoQueryEncoder
 from pyserini.encode.optional._uniir import UniIRQueryEncoder
 from pyserini.prebuilt_index_info import FAISS_INDEX_INFO_M_BEIR
 from pyserini.search.faiss import FaissSearcher
 from pyserini.search.lucene import JBagOfWordsQueryGenerator, JCovid19QueryGenerator, JDisjunctionMaxQueryGenerator, JQuerySideBm25QueryGenerator, LuceneFlatDenseSearcher, LuceneHnswDenseSearcher, LuceneImpactSearcher, LuceneSearcher
-from pyserini.server.config import INDEX_TYPE, SHARDS, IndexConfig, lookup_index_type
-from pyserini.server.index_config import load_index_aliases
+from pyserini.server.config import load_server_config
+from pyserini.server.utils import INDEX_TYPE, SHARDS, IndexConfig, create_searcher, lookup_index_type
 from pyserini.server.document_format import format_lucene_document
 from pyserini.server.errors import BadSearchRequestError, DocumentNotFoundError, IndexNotAvailableError
 from pyserini.util import check_downloaded, download_prebuilt_index, download_url, get_cache_home
@@ -70,8 +69,11 @@ def _norm_opt_str(value: str | None) -> str:
 class SharedSearchBackend:
     """Shared backend for REST and MCP search/doc retrieval."""
 
-    def __init__(self, index_config_path: str | None = None):
-        self._aliases = dict(load_index_aliases(index_config_path))
+    def __init__(self, config_path: str | None = None, *, no_prebuilt_indexes: bool = False):
+        self._no_prebuilt_indexes = no_prebuilt_indexes
+        self._local_indexes, _ = load_server_config(config_path)
+        if self._no_prebuilt_indexes and not self._local_indexes:
+            raise ValueError('--no-prebuilt-indexes requires a non-empty index config (indexes: ...)')
         self.indexes: dict[str, IndexConfig] = {}
         # Serialize get-or-create per logical index name so different indexes can open in parallel.
         self._index_lock_registry = threading.Lock()
@@ -103,8 +105,10 @@ class SharedSearchBackend:
         return unquote(value)
 
     def resolve_index_dir(self, index_key: str) -> str | None:
-        if index_key in self._aliases:
-            return self._aliases[index_key]
+        if index_key in self._local_indexes:
+            return self._local_indexes[index_key].path
+        if self._no_prebuilt_indexes:
+            return None
         p = Path(index_key).expanduser()
         if p.is_dir():
             return str(p.resolve())
@@ -133,6 +137,28 @@ class SharedSearchBackend:
             ef_changed = ef_search is not None and ef_search != config.ef_search
             return enc_changed or ef_changed
         return False
+
+    def _build_searcher(self, config: IndexConfig, *, index_type: str, local_path: str | None = None):
+        if index_type == 'faiss':
+            if config.name in FAISS_INDEX_INFO_M_BEIR:
+                if config.encoder not in ['clip_sf_large', 'blip_ff_large']:
+                    if 'blip-ff-large' in config.name:
+                        config.encoder = 'blip_ff_large'
+                    elif 'clip-sf-large' in config.name:
+                        config.encoder = 'clip_sf_large'
+                    else:
+                        raise BadSearchRequestError('Invalid encoder for m-beir FAISS index.')
+                return FaissSearcher.from_prebuilt_index(
+                    config.name,
+                    query_encoder=UniIRQueryEncoder(
+                        encoder_dir=config.encoder,
+                        instruction_config=self._resolve_mbeir_instruction_config(config.name),
+                    ),
+                )
+        try:
+            return create_searcher(index_type, config, local_path=local_path)
+        except ValueError as e:
+            raise IndexNotAvailableError(f'Unsupported index type for {config.name}: {index_type}') from e
 
     def _ensure_index(
         self,
@@ -170,42 +196,50 @@ class SharedSearchBackend:
                 encoder=encoder,
             )
             searcher: LuceneSearcher | LuceneFlatDenseSearcher | LuceneHnswDenseSearcher | LuceneImpactSearcher | FaissSearcher | None = None
+            if self._no_prebuilt_indexes:
+                local_cfg = self._local_indexes.get(index_name)
+                if local_cfg is None:
+                    raise IndexNotAvailableError(f'Index not configured for this server: {index_name}')
+                config.path = local_cfg.path
+                config.index_type = local_cfg.index_type
+                config.base_index = local_cfg.base_index
+                if config.encoder is None and local_cfg.encoder:
+                    config.encoder = local_cfg.encoder
+                if config.ef_search is None and local_cfg.ef_search is not None:
+                    config.ef_search = local_cfg.ef_search
+                try:
+                    searcher = self._build_searcher(config, index_type=config.index_type, local_path=config.path)
+                except Exception as e:
+                    raise IndexNotAvailableError(f'Unable to open index: {index_name}') from e
+                if config.index_type == 'tf':
+                    config.base_index = config.base_index or index_name
+                config.searcher = searcher
+                self.indexes[index_name] = config
+                return config
+
             resolved_index_type = lookup_index_type(config.name)
             config.index_type = resolved_index_type
-            if resolved_index_type == 'tf':
-                searcher = LuceneSearcher.from_prebuilt_index(config.name)
-                config.base_index = config.name
-            elif resolved_index_type == 'lucene_flat':
-                searcher = LuceneFlatDenseSearcher.from_prebuilt_index(config.name, encoder=config.encoder)
-            elif resolved_index_type == 'lucene_hnsw':
-                searcher = LuceneHnswDenseSearcher.from_prebuilt_index(
-                    config.name, ef_search=config.ef_search, encoder=config.encoder, verbose=True
-                )
-            elif resolved_index_type == 'impact':
-                searcher = LuceneImpactSearcher.from_prebuilt_index(config.name, config.encoder)
-            elif resolved_index_type == 'faiss' and config.name in FAISS_INDEX_INFO_M_BEIR:
-                if config.encoder not in ['clip_sf_large', 'blip_ff_large']:
-                    if 'blip-ff-large' in config.name:
-                        config.encoder = 'blip_ff_large'
-                    elif 'clip-sf-large' in config.name:
-                        config.encoder = 'clip_sf_large'
-                    else:
-                        raise BadSearchRequestError('Invalid encoder for m-beir FAISS index.')
-                searcher = FaissSearcher.from_prebuilt_index(
-                    config.name,
-                    query_encoder=UniIRQueryEncoder(
-                        encoder_dir=config.encoder,
-                        instruction_config=self._resolve_mbeir_instruction_config(config.name),
-                    ),
-                )
-            elif resolved_index_type == 'faiss':
-                searcher = FaissSearcher.from_prebuilt_index(
-                    config.name, query_encoder=AutoQueryEncoder(encoder_dir=config.encoder)
-                )
+            if resolved_index_type in INDEX_TYPE:
+                searcher = self._build_searcher(config, index_type=resolved_index_type)
+                if resolved_index_type == 'tf':
+                    config.base_index = config.name
+            elif allow_local and config.name in self._local_indexes:
+                local_cfg = self._local_indexes[config.name]
+                config.path = local_cfg.path
+                config.index_type = local_cfg.index_type
+                config.base_index = local_cfg.base_index
+                if config.encoder is None and local_cfg.encoder:
+                    config.encoder = local_cfg.encoder
+                if config.ef_search is None and local_cfg.ef_search is not None:
+                    config.ef_search = local_cfg.ef_search
+                searcher = self._build_searcher(config, index_type=config.index_type, local_path=config.path)
+                if config.index_type == 'tf':
+                    config.base_index = config.base_index or config.name
             elif allow_local:
                 index_dir = self.resolve_index_dir(config.name)
                 if index_dir is not None:
-                    searcher = LuceneSearcher(index_dir)
+                    config.path = index_dir
+                    searcher = self._build_searcher(config, index_type='tf', local_path=index_dir)
                     config.base_index = config.name
                     config.index_type = 'tf'
             else:
@@ -220,12 +254,20 @@ class SharedSearchBackend:
             return config
 
     def get_indexes(self, index_type: str) -> list[str]:
-        indexes = INDEX_TYPE.get(index_type)
-        if indexes is None:
+        if index_type not in INDEX_TYPE:
             raise BadSearchRequestError(f'Index type must be one of {list(INDEX_TYPE.keys())}')
-        return list(indexes.keys())
+        if self._no_prebuilt_indexes:
+            return [name for name, cfg in self._local_indexes.items() if cfg.index_type == index_type]
+        return list(INDEX_TYPE[index_type].keys())
 
     def get_status(self, index_name: str) -> dict[str, Any]:
+        if self._no_prebuilt_indexes:
+            local_cfg = self._local_indexes.get(index_name)
+            if local_cfg is None:
+                raise BadSearchRequestError(f'Unknown index: {index_name}')
+            status = {k: v for k, v in local_cfg.__dict__.items() if v is not None}
+            status['no_prebuilt_indexes'] = True
+            return status
         status = {'downloaded': check_downloaded(index_name)}
         index_type = lookup_index_type(index_name)
         if index_type is not None:
@@ -444,16 +486,20 @@ class SharedSearchBackend:
 
 
 _backend: SharedSearchBackend | None = None
-_backend_index_config_path: str | None = None
+_backend_config_path: str | None = None
+_backend_no_prebuilt_indexes: bool = False
 
 
-def get_backend(index_config_path: str | None = None) -> SharedSearchBackend:
+def get_backend(config_path: str | None = None, *, no_prebuilt_indexes: bool = False) -> SharedSearchBackend:
     """Return process-wide shared backend instance."""
-    global _backend, _backend_index_config_path
-    if _backend is not None and index_config_path != _backend_index_config_path:
+    global _backend, _backend_config_path, _backend_no_prebuilt_indexes
+    if _backend is not None and (
+        config_path != _backend_config_path or no_prebuilt_indexes != _backend_no_prebuilt_indexes
+    ):
         _backend.close_all()
         _backend = None
     if _backend is None:
-        _backend = SharedSearchBackend(index_config_path=index_config_path)
-        _backend_index_config_path = index_config_path
+        _backend = SharedSearchBackend(config_path=config_path, no_prebuilt_indexes=no_prebuilt_indexes)
+        _backend_config_path = config_path
+        _backend_no_prebuilt_indexes = no_prebuilt_indexes
     return _backend
